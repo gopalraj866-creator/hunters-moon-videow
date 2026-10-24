@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hunter's Moon 2026</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="src/overlay.css">
+<script type="importmap">
+{ "imports": { "three": "./node_modules/three/build/three.module.js", "three/addons/": "./node_modules/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="gl"></canvas>
+    <div id="overlay">
+      <div id="scrim"></div>
+      <div id="labels"></div>
+      <div id="hud"></div>
+      <div id="cards"></div>
+      <div id="prompts"></div>
+    </div>
+    <div id="fade"></div>
+  </div>
+  <div id="status">loading…</div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>

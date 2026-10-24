@@ -1,0 +1,145 @@
+name: Render Hunter's Moon video
+
+# Renders the 8-minute Three.js/WebGL film frame-by-frame, sharded across parallel runners,
+# then stitches shards + soundtrack into 1080p, 4K and 9:16 Shorts files.
+on:
+  workflow_dispatch:
+    inputs:
+      render_1080p:   { description: 'Render 1080p (16:9)',          type: boolean, default: true }
+      render_4k:      { description: 'Render 4K 2160p (16:9)  [slow]', type: boolean, default: false }
+      render_shorts:  { description: 'Render Shorts 1080x1920 (9:16, 58 s)', type: boolean, default: true }
+      smoke_test:     { description: 'Smoke test only: first 12 s at 540p, 1 shard (≈10 min)', type: boolean, default: false }
+      publish_date:   { description: 'Publish date YYYY-MM-DD (drives the "IN N DAYS" countdown). Blank = today (UTC)', type: string, default: '' }
+      fps:            { description: 'Frames per second (24 renders 20% faster)', type: choice, options: ['30', '24', '60'], default: '30' }
+      shards_1080p:   { description: 'Parallel shards for 1080p', type: string, default: '20' }
+      shards_4k:      { description: 'Parallel shards for 4K (≥40 recommended)', type: string, default: '48' }
+      shards_shorts:  { description: 'Parallel shards for Shorts', type: string, default: '4' }
+      tts_provider:   { description: 'Narration engine', type: choice, options: ['edge', 'espeak', 'none'], default: 'edge' }
+      tts_voice:      { description: 'edge-tts voice', type: string, default: 'en-GB-RyanNeural' }
+      create_release: { description: 'Attach finished videos to a GitHub Release', type: boolean, default: false }
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      resolutions: ${{ steps.m.outputs.resolutions }}
+      publish: ${{ steps.m.outputs.publish }}
+      limit: ${{ steps.m.outputs.limit }}
+    steps:
+      - id: m
+        shell: bash
+        run: |
+          PUB="${{ inputs.publish_date }}"; [ -z "$PUB" ] && PUB=$(date -u +%F)
+          echo "publish=$PUB" >> $GITHUB_OUTPUT
+          SMOKE="${{ inputs.smoke_test }}"
+          LIMIT=""; [ "$SMOKE" = "true" ] && LIMIT="12"
+          echo "limit=$LIMIT" >> $GITHUB_OUTPUT
+          items=(); res=()
+          add() { # res shards
+            local r=$1 n=$2
+            res+=("\"$r\"")
+            for ((i=0;i<n;i++)); do items+=("{\"res\":\"$r\",\"shard\":$i,\"shards\":$n,\"render_res\":\"$r\"}"); done
+          }
+          [ "${{ inputs.render_1080p }}" = "true" ]  && add 1080p  ${{ inputs.shards_1080p }}
+          [ "${{ inputs.render_4k }}" = "true" ]     && add 4k     ${{ inputs.shards_4k }}
+          [ "${{ inputs.render_shorts }}" = "true" ] && add shorts ${{ inputs.shards_shorts }}
+          [ "$SMOKE" = "true" ] && { items=('{"res":"1080p","shard":0,"shards":1,"render_res":"540p"}'); res=('"1080p"'); }
+          echo "matrix={\"include\":[$(IFS=,; echo "${items[*]}")]}" >> $GITHUB_OUTPUT
+          echo "resolutions=[$(IFS=,; echo "${res[*]}")]" >> $GITHUB_OUTPUT
+
+  audio:
+    runs-on: ubuntu-24.04
+    needs: plan
+    strategy:
+      matrix: { profile: [full, short] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg espeak-ng
+      - run: pip install edge-tts
+      - name: Score + narration
+        run: |
+          node audio/make-music.mjs --profile ${{ matrix.profile }} --out build/music_${{ matrix.profile }}.wav --publish ${{ needs.plan.outputs.publish }}
+          node audio/narrate.mjs --profile ${{ matrix.profile }} --provider ${{ inputs.tts_provider }} --voice "${{ inputs.tts_voice }}" --publish ${{ needs.plan.outputs.publish }} --out build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-${{ matrix.profile }}
+          path: |
+            build/audio_${{ matrix.profile }}.m4a
+            build/lines_${{ matrix.profile }}.json
+
+  render:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: render ${{ matrix.res }} · shard ${{ matrix.shard }}/${{ matrix.shards }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libnss3 libgbm1 libxkbcommon0 libasound2t64 fonts-liberation
+      - run: npm ci
+      - name: Headless Chrome
+        run: npx puppeteer browsers install chrome-headless-shell
+      - name: Render shard
+        env: { GL_BACKEND: swiftshader }
+        run: |
+          mkdir -p build/segs
+          node render/render.mjs --res ${{ matrix.render_res || matrix.res }} --fps ${{ inputs.fps }} \
+            --publish ${{ needs.plan.outputs.publish }} \
+            --shard ${{ matrix.shard }} --shards ${{ matrix.shards }} \
+            ${{ needs.plan.outputs.limit != '' && format('--limit {0}', needs.plan.outputs.limit) || '' }} \
+            --out build/segs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seg-${{ matrix.res }}-${{ matrix.shard }}
+          path: build/segs/seg_*.mp4
+          retention-days: 3
+          compression-level: 0
+
+  assemble:
+    needs: [plan, audio, render]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        res: ${{ fromJSON(needs.plan.outputs.resolutions) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libnss3 libgbm1 libxkbcommon0 libasound2t64 fonts-liberation
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'seg-${{ matrix.res }}-*', path: build/segs, merge-multiple: true }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'audio-*', path: build, merge-multiple: true }
+      - name: Stitch + mux
+        run: |
+          P=full; [ "${{ matrix.res }}" = "shorts" ] && P=short
+          node render/assemble.mjs --segments build/segs --audio build/audio_$P.m4a --out dist/HuntersMoon_${{ matrix.res }}.mp4 \
+            --title "Hunter's Moon 2026 (${{ matrix.res }})"
+      - name: Thumbnail + upload kit
+        if: matrix.res != 'shorts'
+        run: |
+          npx puppeteer browsers install chrome-headless-shell
+          node render/render.mjs --res thumb --publish ${{ needs.plan.outputs.publish }} --out dist
+          node render/metadata.mjs --publish ${{ needs.plan.outputs.publish }} --build build --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HuntersMoon-${{ matrix.res }}
+          path: dist/
+          compression-level: 0
+      - name: Release
+        if: inputs.create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: huntersmoon-${{ needs.plan.outputs.publish }}-${{ matrix.res }}
+          files: dist/*

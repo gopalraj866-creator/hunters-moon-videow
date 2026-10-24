@@ -1,0 +1,20 @@
+{
+  "name": "hunters-moon-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "8-minute cinematic Three.js/WebGL video about the Hunter's Moon (Oct 26, 2026) rendered frame-by-frame in GitHub Actions at 1080p, 4K and 9:16 Shorts.",
+  "type": "module",
+  "scripts": {
+    "dev": "node render/serve.mjs",
+    "timeline": "node render/make-timeline.mjs",
+    "test:frames": "node render/render.mjs --profile full --res 1080p --still 12,60,100,150,200,260,300,350,400,455,472 --out build/stills",
+    "render": "node render/render.mjs",
+    "thumbnail": "node render/thumbnail.mjs",
+    "metadata": "node render/metadata.mjs"
+  },
+  "dependencies": {
+    "puppeteer": "^24.0.0",
+    "three": "0.186.1"
+  },
+  "engines": { "node": ">=20" }
+}
